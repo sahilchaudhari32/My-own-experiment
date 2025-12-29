@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand-Controlled Realistic Earth</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        
+        /* UI & HUD */
+        #ui-layer {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            color: white; pointer-events: none;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px; border-radius: 12px;
+            border: 1px solid rgba(100, 200, 255, 0.3);
+        }
+        h1 { margin: 0 0 10px 0; color: #4da6ff; font-size: 1.5rem; text-transform: uppercase; }
+        p { margin: 8px 0; font-size: 1rem; color: #eee; display: flex; align-items: center;}
+        .icon { font-size: 1.2rem; margin-right: 10px; }
+        #status-text { font-weight: bold; margin-top: 15px; display: block; color: #ffd700;}
+
+        /* LOADING SCREEN */
+        #loader {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #020205; z-index: 100;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            color: #4da6ff; transition: opacity 1s ease-out;
+        }
+        .earth-spinner {
+            width: 60px; height: 60px; border-radius: 50%;
+            border: 4px solid #4da6ff; border-top-color: transparent;
+            animation: spin 1s linear infinite; margin-bottom: 20px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* CANVAS */
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        canvas { display: block; width: 100% !important; height: 100% !important; }
+        #input-video { display: none; }
+    </style>
+</head>
+<body>
+
+    <div id="loader">
+        <div class="earth-spinner"></div>
+        <div id="loader-text">Loading Textures & Initializing Camera...</div>
+    </div>
+
+    <div id="ui-layer">
+        <h1>Planetary Control</h1>
+        <p><span class="icon">🖐</span> <b>1 Hand:</b> Move to Rotate</p>
+        <p><span class="icon">🙌</span> <b>2 Hands:</b> Distance to Scale</p>
+        <span id="status-text">System: Initializing...</span>
+    </div>
+
+    <video id="input-video" playsinline></video>
+    <div id="canvas-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // --- CONFIG & STATE ---
+        const STATE = {
+            mode: 'IDLE',
+            handsDetected: 0,
+            lastHandPos: new THREE.Vector2(),
+            targetRotation: { x: 0.2, y: 0 },
+            currentRotation: { x: 0.2, y: 0 },
+            initialPinchDist: 0,
+            baseScale: 1,
+            targetScale: 1,
+            currentScale: 1
+        };
+
+        const statusText = document.getElementById('status-text');
+        const loader = document.getElementById('loader');
+
+        // --- THREE.JS SETUP ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 40; 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        sunLight.position.set(5, 3, 5);
+        scene.add(sunLight);
+        scene.add(new THREE.AmbientLight(0x404040, 0.5));
+
+        // Starfield
+        const starGeo = new THREE.SphereGeometry(90, 32, 32);
+        const starMat = new THREE.MeshBasicMaterial({
+            map: new THREE.TextureLoader().load('https://threejs.org/examples/textures/planets/starfield.jpg'),
+            side: THREE.BackSide
+        });
+        scene.add(new THREE.Mesh(starGeo, starMat));
+
+        // --- EARTH GROUP ---
+        const earthGroup = new THREE.Group();
+        scene.add(earthGroup);
+
+        const loaderManager = new THREE.LoadingManager();
+        loaderManager.onLoad = () => {
+            document.getElementById('loader-text').innerText = "Waiting for Camera...";
+        };
+
+        const textureLoader = new THREE.TextureLoader(loaderManager);
+        textureLoader.setCrossOrigin('anonymous');
+
+        // Earth
+        const earthGeo = new THREE.SphereGeometry(10, 64, 64);
+        const earthMat = new THREE.MeshPhongMaterial({
+            map: textureLoader.load('https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg'),
+            bumpMap: textureLoader.load('https://threejs.org/examples/textures/planets/earth_normal_2048.jpg'),
+            bumpScale: 0.5,
+            specularMap: textureLoader.load('https://threejs.org/examples/textures/planets/earth_specular_2048.jpg'),
+            specular: new THREE.Color('grey')
+        });
+        earthGroup.add(new THREE.Mesh(earthGeo, earthMat));
+
+        // Clouds
+        const cloudGeo = new THREE.SphereGeometry(10.2, 64, 64);
+        const cloudMat = new THREE.MeshPhongMaterial({
+            map: textureLoader.load('https://threejs.org/examples/textures/planets/earth_clouds_1024.png'),
+            transparent: true,
+            opacity: 0.4
+        });
+        const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+        earthGroup.add(cloudMesh);
+
+        // --- MEDIAPIPE LOGIC ---
+        const videoElement = document.getElementById('input-video');
+
+        function onResults(results) {
+            if (loader.style.opacity !== '0') {
+                loader.style.opacity = '0';
+                setTimeout(() => loader.style.display = 'none', 1000);
+            }
+
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                STATE.mode = 'IDLE';
+                statusText.innerText = "Status: Idle (Auto-rotating)";
+                statusText.style.color = "#ffd700";
+                STATE.targetRotation.y += 0.002;
+                return;
+            }
+
+            const hands = results.multiHandLandmarks;
+            if (hands.length === 1) {
+                // ROTATION
+                const pos = hands[0][9]; // Middle finger knuckle
+                if (STATE.mode !== 'ROTATING') {
+                    STATE.lastHandPos.set(pos.x, pos.y);
+                    STATE.mode = 'ROTATING';
+                    statusText.innerText = "Status: Rotating Earth";
+                    statusText.style.color = "#00ff00";
+                }
+                const dx = pos.x - STATE.lastHandPos.x;
+                const dy = pos.y - STATE.lastHandPos.y;
+                STATE.targetRotation.y += dx * 5;
+                STATE.targetRotation.x += dy * 2;
+                STATE.lastHandPos.set(pos.x, pos.y);
+            } else if (hands.length === 2) {
+                // SCALING
+                const h1 = hands[0][9];
+                const h2 = hands[1][9];
+                const dist = Math.hypot(h1.x - h2.x, h1.y - h2.y);
+                
+                if (STATE.mode !== 'SCALING') {
+                    STATE.initialPinchDist = dist;
+                    STATE.baseScale = STATE.currentScale;
+                    STATE.mode = 'SCALING';
+                    statusText.innerText = "Status: Scaling Earth";
+                    statusText.style.color = "#ff00ff";
+                }
+                STATE.targetScale = Math.max(0.5, Math.min(2.5, STATE.baseScale * (dist / STATE.initialPinchDist)));
+            }
+        }
+
+        const handsPipe = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        handsPipe.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        handsPipe.onResults(onResults);
+
+        const cameraPipe = new Camera(videoElement, {
+            onFrame: async () => { await handsPipe.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+        cameraPipe.start();
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Smooth interpolation
+            STATE.currentRotation.x += (STATE.targetRotation.x - STATE.currentRotation.x) * 0.1;
+            STATE.currentRotation.y += (STATE.targetRotation.y - STATE.currentRotation.y) * 0.1;
+            STATE.currentScale += (STATE.targetScale - STATE.currentScale) * 0.1;
+
+            earthGroup.rotation.set(STATE.currentRotation.x, STATE.currentRotation.y, 0);
+            earthGroup.scale.setScalar(STATE.currentScale);
+            cloudMesh.rotation.y += 0.001; // Constant cloud drift
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
