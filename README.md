@@ -42,7 +42,7 @@ Hosted on Netlify, enabling fast and scalable deployment of modern web applicati
 Explore different projects and experiments in one place — clean UI, fast performance, and real-world implementations.
 
 ## 🚀 Getting Started
-git clone https://github.com/your-username/experiments-showcase.git<br>
+git clone https://github.com/sahilchaudhari32/My-own-experiment.git<br>
 cd experiments-showcase<br>
 npm install<br>
 npm run dev<br>
